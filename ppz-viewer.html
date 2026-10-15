@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPZ Viewer — просмотр уровней PathPix</title>
+<style>
+:root{
+  --bg:#f4f4f8; --surface:#ffffff; --raised:#fafafc;
+  --border:#d9d9e3; --text:#1a1a24; --text2:#66667a;
+  --accent:#3b3b9e; --ok:#1a9e4b; --bad:#d43a3a;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);display:flex;justify-content:center;padding:24px 12px}
+.app{width:100%;max-width:780px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px 24px 24px;box-shadow:0 1px 3px rgba(20,20,40,.06)}
+h1{font-size:18px;margin:0 0 2px;font-weight:600}
+.sub{font-size:13px;color:var(--text2);margin-bottom:14px}
+.bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:transparent;color:var(--text2);padding:6px 14px;font:500 13px var(--sans);cursor:pointer}
+.seg button.on{background:var(--text);color:#fff}
+.btn{border:1px solid var(--border);border-radius:8px;background:var(--raised);color:var(--text);padding:6px 14px;font:500 13px var(--sans);cursor:pointer}
+.btn:hover{background:#f0f0f6}
+.name{font:400 12px var(--mono);color:var(--text2)}
+.stage{display:flex;justify-content:center;margin-top:12px;border:1.5px dashed var(--border);border-radius:12px;padding:12px;min-height:160px}
+.stage.over{border-color:var(--accent);background:#f6f6ff}
+canvas{display:block;border-radius:6px;cursor:crosshair;max-width:100%;height:auto}
+.status{margin-top:10px;font:400 12px var(--mono);color:var(--text2);min-height:16px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.chip{border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:12px;color:var(--text2)}
+.chip b{font-weight:500;color:var(--text)}
+.chip.ok b{color:var(--ok)}
+.chip.bad b{color:var(--bad)}
+.errs{margin-top:6px;font:400 12px var(--mono);color:var(--bad);white-space:pre-wrap}
+.foot{margin-top:16px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--text2);line-height:1.5}
+kbd{border:1px solid var(--border);border-radius:4px;padding:0 4px;font:11px var(--mono);background:var(--raised)}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#14141c;--surface:#1d1d28;--raised:#242432;--border:#35354a;--text:#eceaf4;--text2:#9a9ab0;--accent:#7d7de0;--ok:#3ecf72;--bad:#ff7070}
+  .btn:hover{background:#2c2c3e}
+  .stage.over{background:#20203a}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>PPZ Viewer</h1>
+  <div class="sub">Визуальный просмотр уровней PathPix (файлы .ppz): загадка, решение из стрелок, стены и проверка целостности.</div>
+  <div class="bar">
+    <div class="seg">
+      <button id="mPuz" class="on">Уровень</button>
+      <button id="mSol">Решение</button>
+    </div>
+    <button class="btn" id="openBtn">Открыть файл…</button>
+    <span class="name" id="fname">demo: 001.ppz</span>
+    <input type="file" id="fileIn" accept=".ppz,.bin" style="display:none">
+  </div>
+  <div class="stage" id="stage"><canvas id="board" width="300" height="200"></canvas></div>
+  <div class="status" id="status">перетащите .ppz файл в область выше или нажмите «открыть»</div>
+  <div class="chips" id="chips"></div>
+  <div class="errs" id="errs"></div>
+  <div class="foot">
+    Формат: заголовок <kbd>PPZ&nbsp;</kbd> + версии + размер тела; тело v1 — размеры, палитра ARGB,
+    затем по 3 байта на клетку (row-major): цвет (5 бит), стрелки (3+3 бита, коды 1=W,2=N,3=E,4=S),
+    подсказка (5 бит: 0 — путь, 1 — квадратик, иначе длина пути), маска стен (W=1,N=2,E=4,S=8).
+  </div>
+</div>
+<script>
+const DEMO='UFBaIAIBAAAA4QAHAAgEAAAAAAAAAAAAAAAAAAAAUgAAAAAAAAAAAAAAAAAAAAAAAAAA//////8AAAD/zDMA//9mMwsEAAkDAAkDAAkDAAkwABAUAAsQAAkQAAgyABMoABEEAAs4AAkEABASABsEABkEABMoABEDABECAAsEAAkCABsoABkCABgqABMEABEEAAsEAAkCABgcABsEABkEAAgIABA6ABIEAAg6ABsYABkCABoEABgyABAIAAgcABMCABEEABsEABkEABsCABkwAAgUAAsCAAkYABA6ABgqABsCABkoABAIAAgSAA==';
+let P=null, mode='puz';
+const $=id=>document.getElementById(id);
+const DN=['—','W','N','E','S','?','?','?'], WN=['W','N','E','S'], WB={W:1,N:2,E:4,S:8};
+const WDEL={W:[0,-1],N:[-1,0],E:[0,1],S:[1,0]};
+const ADEL={1:[0,-1],2:[-1,0],3:[0,1],4:[1,0]};
+const ARGB=n=>'rgba('+(n>>>16&255)+','+(n>>>8&255)+','+(n&255)+','+((n>>>24&255)/255)+')';
+const lum=n=>{const r=n>>>16&255,g=n>>>8&255,b=n&255;return(0.3*r+0.59*g+0.11*b)/255};
+
+function parsePPZ(buf){
+  const dv=new DataView(buf);
+  const mk=String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+  if(mk!=='PPZ ') throw new Error('маркер «'+mk+'», ожидался «PPZ »');
+  const cv=dv.getUint8(4), bv=dv.getUint8(5);
+  let hs=10, bs;
+  if(cv===2||cv===3){ bs=dv.getUint32(6); if(cv===3) hs=18; }
+  else if(cv===4){ bs=dv.getUint16(6); hs=8; }
+  else throw new Error('версия контейнера '+cv+' (известны 2–4)');
+  if(buf.byteLength-hs!==bs) throw new Error('размер тела '+bs+' ≠ файлу минус заголовок ('+(buf.byteLength-hs)+')');
+  if(bv!==1) throw new Error('тело v'+bv+' — поддержан только поклеточный v1 (геометрии R/B/H)');
+  let o=hs;
+  const rows=dv.getUint16(o), cols=dv.getUint16(o+2), nc=dv.getUint8(o+4); o+=5+15;
+  const geom=String.fromCharCode(dv.getUint8(o)); o+=1+4+16;
+  const pal=[]; for(let i=0;i<nc;i++){ pal.push(dv.getUint32(o)); o+=4; }
+  if(buf.byteLength-o!==rows*cols*3) throw new Error('хвост '+(buf.byteLength-o)+' байт ≠ '+rows*cols*3+' (записи 3 байта)');
+  const cells=[];
+  for(let i=0;i<rows*cols;i++){
+    const b0=dv.getUint8(o), b1=dv.getUint8(o+1), b2=dv.getUint8(o+2); o+=3;
+    cells.push({color:b0>>3, hi:b0&7, clue:b1>>3, lo:b1&7, wall:b2});
+  }
+  return {rows,cols,nc,geom,pal,cells,cv};
+}
+
+function validate(p){
+  const {rows,cols,cells}=p, N=rows*cols;
+  const errs=[]; let squares=0, clues=0, walls=0, sumClues=0, paths=0;
+  const adj=cells.map((cl,i)=>{
+    const r=(i/cols)|0, c=i%cols, out=[];
+    for(const code of [cl.hi,cl.lo]) if(code){
+      if(code>4){ errs.push('код стрелки '+code+' вне 1–4 ('+r+','+c+')'); continue; }
+      const d=ADEL[code], nr=r+d[0], ncc=c+d[1];
+      if(nr<0||nr>=rows||ncc<0||ncc>=cols) errs.push('стрелка '+DN[code]+' за границей поля ('+r+','+c+')');
+      else out.push(nr*cols+ncc);
+    }
+    return out;
+  });
+  cells.forEach((cl,i)=>{
+    const r=(i/cols)|0, c=i%cols, d=adj[i].length;
+    if(cl.clue===1){ squares++; if(d) errs.push('квадратик со стрелками ('+r+','+c+')'); }
+    else if(cl.clue>1){ clues++; sumClues+=cl.clue; if(d!==1) errs.push('подсказка ('+r+','+c+') имеет степень '+d); }
+    else if(d!==2) errs.push('клетка ('+r+','+c+') имеет степень '+d);
+    if(cl.color>=p.nc) errs.push('цвет #'+cl.color+' вне палитры ('+r+','+c+')');
+    for(const n of adj[i]){
+      const nr=(n/cols)|0, nc=n%cols, s=nr<r?'N':nr>r?'S':nc<c?'W':'E';
+      if(cl.wall&WB[s]) errs.push('путь через стену ('+r+','+c+')→'+s);
+    }
+    for(const s of WN){ const b=WB[s];
+      if(cl.wall&b){ walls++;
+        const d=WDEL[s], nr=r+d[0], ncc=c+d[1];
+        if(nr<0||nr>=rows||ncc<0||ncc>=cols) errs.push('стена '+s+' на краю поля ('+r+','+c+')');
+        else if(!(cells[nr*cols+ncc].wall&WB[{W:'E',E:'W',N:'S',S:'N'}[s]])) errs.push('стена ('+r+','+c+')'+s+' без пары');
+      }
+    }
+  });
+  walls/=2;
+  const visited=new Set();
+  for(let i=0;i<N;i++){
+    const cl=cells[i]; if(cl.clue<=1||visited.has(i)) continue;
+    paths++; let cur=i, prev=null, len=1; visited.add(i);
+    for(;;){
+      const nx=adj[cur].filter(x=>x!==prev);
+      if(!nx.length){ errs.push('тупик в пути от ('+((i/cols)|0)+','+(i%cols)+')'); break; }
+      const nxt=nx[0];
+      if(visited.has(nxt)){ errs.push('петля в пути от ('+((i/cols)|0)+','+(i%cols)+')'); break; }
+      visited.add(nxt); prev=cur; cur=nxt; len++;
+      if(cells[cur].clue>1) break;
+    }
+    if(cells[cur].clue>1){
+      if(cells[cur].clue!==cells[i].clue||len!==cells[i].clue) errs.push('путь ('+((i/cols)|0)+','+(i%cols)+'): длина '+len+' ≠ подсказке '+cells[i].clue);
+      if(cells[cur].color!==cells[i].color) errs.push('концы пути разного цвета ('+((i/cols)|0)+','+(i%cols)+')');
+    }
+  }
+  for(let i=0;i<N;i++){ const cl=cells[i];
+    if(cl.clue>1&&!visited.has(i)) errs.push('подсказка ('+((i/cols)|0)+','+(i%cols)+') ни с чем не соединена');
+    if(cl.clue!==1&&!visited.has(i)) errs.push('клетка ('+((i/cols)|0)+','+(i%cols)+') вне путей');
+  }
+  if(sumClues!==2*(N-squares)) errs.push('сумма подсказок '+sumClues+' ≠ 2×(клетки−квадратики)='+2*(N-squares));
+  return {squares,clues,walls,paths,errs,ok:!errs.length};
+}
+
+function draw(){
+  const cv=$('board'), ctx=cv.getContext('2d');
+  const stage=$('stage'), avail=Math.max(240,stage.clientWidth-24);
+  const cell=Math.max(10,Math.min(46,Math.floor(avail/P.cols),Math.floor(520/P.rows)));
+  const pad=10, W=P.cols*cell+pad*2, H=P.rows*cell+pad*2;
+  cv.width=W; cv.height=H;
+  ctx.fillStyle='#34349c'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#cdcbe4'; ctx.fillRect(pad,pad,P.cols*cell,P.rows*cell);
+  ctx.strokeStyle='#b4b3d2'; ctx.lineWidth=1;
+  for(let i=0;i<=P.cols;i++){ ctx.beginPath(); ctx.moveTo(pad+i*cell+.5,pad); ctx.lineTo(pad+i*cell+.5,pad+P.rows*cell); ctx.stroke(); }
+  for(let j=0;j<=P.rows;j++){ ctx.beginPath(); ctx.moveTo(pad,pad+j*cell+.5); ctx.lineTo(pad+P.cols*cell,pad+j*cell+.5); ctx.stroke(); }
+  const cx=i=>pad+(i%P.cols)*cell+cell/2, cy=i=>pad+((i/P.cols)|0)*cell+cell/2;
+  const col=i=>ARGB(P.pal[P.cells[i].color]);
+  ctx.strokeStyle='#d81e1e'; ctx.lineWidth=Math.max(3,cell*0.1); ctx.lineCap='round';
+  const inset=cell*0.22;
+  P.cells.forEach((cl,i)=>{
+    const r=(i/P.cols)|0, c=i%P.cols, x0=pad+c*cell, y0=pad+r*cell;
+    const seg=(a,b)=>{ ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); };
+    if(cl.wall&1) seg([x0,y0+inset],[x0,y0+cell-inset]);
+    if(cl.wall&2) seg([x0+inset,y0],[x0+cell-inset,y0]);
+    if(cl.wall&4) seg([x0+cell,y0+inset],[x0+cell,y0+cell-inset]);
+    if(cl.wall&8) seg([x0+inset,y0+cell],[x0+cell-inset,y0+cell]);
+  });
+  if(mode==='sol'){
+    ctx.lineWidth=cell*0.72; ctx.lineCap='round'; ctx.lineJoin='round';
+    P.cells.forEach((cl,i)=>{
+      for(const code of [cl.hi,cl.lo]){ if(!code||code>4) continue;
+        const d=ADEL[code], n=((i/P.cols)|0)+d[0], m=(i%P.cols)+d[1];
+        if(n<0||n>=P.rows||m<0||m>=P.cols) continue;
+        const j=n*P.cols+m; if(j<=i) continue;
+        ctx.strokeStyle=col(i); ctx.beginPath(); ctx.moveTo(cx(i),cy(i)); ctx.lineTo(cx(j),cy(j)); ctx.stroke();
+      }
+    });
+  }
+  P.cells.forEach((cl,i)=>{
+    if(cl.clue!==1) return;
+    const s=cell*0.55, x=cx(i)-s/2, y=cy(i)-s/2;
+    ctx.fillStyle=col(i); ctx.fillRect(x,y,s,s);
+  });
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  P.cells.forEach((cl,i)=>{
+    if(cl.clue<=1) return;
+    const R=cell*0.38;
+    ctx.fillStyle=col(i); ctx.beginPath(); ctx.arc(cx(i),cy(i),R,0,7); ctx.fill();
+    ctx.fillStyle=lum(P.pal[cl.color])>0.62?'#1a1a1a':'#ffffff';
+    ctx.font='500 '+Math.round(cell*0.42)+'px system-ui,sans-serif';
+    ctx.fillText(cl.clue,cx(i),cy(i)+1);
+  });
+}
+
+function load(buf,name){
+  try{
+    P=parsePPZ(buf);
+    const v=validate(P);
+    $('fname').textContent=name;
+    $('status').textContent='';
+    $('errs').textContent=v.ok?'':v.errs.slice(0,6).join('\n')+(v.errs.length>6?'\n… +'+ (v.errs.length-6):'');
+    $('chips').innerHTML=
+      '<span class="chip">поле <b>'+P.rows+'×'+P.cols+'</b></span>'+
+      '<span class="chip">цветов <b>'+P.nc+'</b></span>'+
+      '<span class="chip">подсказок <b>'+v.clues+'</b></span>'+
+      '<span class="chip">квадратиков <b>'+v.squares+'</b></span>'+
+      '<span class="chip">стен <b>'+v.walls+'</b></span>'+
+      '<span class="chip">путей <b>'+v.paths+'</b></span>'+
+      (v.ok?'<span class="chip ok">проверка <b>OK</b></span>':'<span class="chip bad">проблем <b>'+v.errs.length+'</b></span>');
+    draw();
+  }catch(e){
+    P=null; $('fname').textContent=name;
+    $('status').textContent='не удалось разобрать: '+e.message;
+    $('chips').innerHTML=''; $('errs').textContent='';
+    const ctx=$('board').getContext('2d'); ctx.clearRect(0,0,$('board').width,$('board').height);
+  }
+}
+
+$('mPuz').onclick=()=>{ mode='puz'; $('mPuz').classList.add('on'); $('mSol').classList.remove('on'); if(P) draw(); };
+$('mSol').onclick=()=>{ mode='sol'; $('mSol').classList.add('on'); $('mPuz').classList.remove('on'); if(P) draw(); };
+$('openBtn').onclick=()=>$('fileIn').click();
+$('fileIn').onchange=e=>{ const f=e.target.files[0]; if(f) f.arrayBuffer().then(b=>load(b,f.name)); };
+const stage=$('stage');
+stage.addEventListener('dragover',e=>{ e.preventDefault(); stage.classList.add('over'); });
+stage.addEventListener('dragleave',()=>stage.classList.remove('over'));
+stage.addEventListener('drop',e=>{ e.preventDefault(); stage.classList.remove('over'); const f=e.dataTransfer.files[0]; if(f) f.arrayBuffer().then(b=>load(b,f.name)); });
+$('board').addEventListener('mousemove',e=>{
+  if(!P) return;
+  const r=$('board').getBoundingClientRect(), pad=10, sx=$('board').width/r.width, sy=$('board').height/r.height;
+  const c=Math.floor((e.clientX-r.left-pad/sx)/(($('board').width-20)/sx/P.cols));
+  const rw=Math.floor((e.clientY-r.top-pad/sy)/(($('board').height-20)/sy/P.rows));
+  if(rw<0||rw>=P.rows||c<0||c>=P.cols){ $('status').textContent=''; return; }
+  const cl=P.cells[rw*P.cols+c];
+  const ws=WN.filter(s=>cl.wall&WB[s]).join('')||'—';
+  $('status').textContent='('+rw+','+c+')  цвет #'+cl.color+'  подсказка '+(cl.clue||'—')+'  стрелки '+DN[cl.hi]+'/'+DN[cl.lo]+'  стены '+ws;
+});
+$('board').addEventListener('mouseleave',()=>{ if(P) $('status').textContent=''; });
+window.addEventListener('resize',()=>{ if(P) draw(); });
+load(Uint8Array.from(atob(DEMO),ch=>ch.charCodeAt(0)).buffer,'demo: 001.ppz');
+</script>
+</body>
+</html>

@@ -26,20 +26,58 @@ from PIL import Image, ImageDraw
 
 # ---------- 1. изображение -> сетка ----------
 
-def image_to_grid(img, max_size=150, n_colors=10, merge_thresh=24):
-    """-> (grid[rows][cols] значения 1..K, palette [(a,r,g,b)...] длиной K+1, slot0=фон)"""
+def image_to_grid(img, max_size=150, n_colors=10, merge_thresh=24,
+                  method='kmeans', seed=0):
+    """-> (grid[rows][cols] значения 1..K, palette [(a,r,g,b)...] длиной K+1, slot0=фон)
+    method: kmeans (sklearn, умолчание) | median (PIL MEDIANCUT) | exact (реальные
+    цвета, если их <= 30, иначе фолбэк в kmeans)."""
     img = img.convert('RGB')
     w, h = img.size
     s = min(1.0, max_size / max(w, h))
     if s < 1.0:
         img = img.resize((max(1, round(w * s)), max(1, round(h * s))), Image.LANCZOS)
-    q = img.quantize(colors=max(2, min(30, n_colors)), method=Image.MEDIANCUT)
-    idx = list(q.getdata())
-    K = max(idx) + 1  # фактически использовано цветов (может быть < запрошенных)
-    pal = q.getpalette()[:K * 3]
-    # слияние визуально идентичных цветов: JPEG-шум раскалывает плоские заливки
-    # на десятки близких индексов -> шахматные микро-области -> лавина квадратиков.
-    # Порок мал vs типичное расстояние между настоящими цветами палитры.
+    K_req = max(2, min(30, n_colors))
+    warn = None
+
+    if method == 'exact':
+        cnt_rgb = Counter(img.getdata())
+        if len(cnt_rgb) > 30:
+            warn = f'exact: в изображении {len(cnt_rgb)} цветов (> 30) — фолбэк в kmeans'
+            method = 'kmeans'
+        else:
+            order = [c for c, _ in cnt_rgb.most_common()]
+            pos = {c: i for i, c in enumerate(order)}
+            K = len(order)
+            pal = [v for c in order for v in c]
+            idx = [pos[p] for p in img.getdata()]
+
+    if method == 'kmeans':
+        try:
+            import numpy as np
+            from sklearn.cluster import KMeans
+            arr = np.asarray(img)
+            px = arr.reshape(-1, 3)
+            km = KMeans(n_clusters=K_req, random_state=seed, n_init=5).fit(px)
+            centers = np.round(km.cluster_centers_).astype(int).clip(0, 255)
+            order_c = [tuple(c) for c in centers]
+            pos = {c: i for i, c in enumerate(order_c)}
+            K = len(order_c)
+            pal = [v for c in order_c for v in c]
+            idx = [pos[tuple(centers[l])] for l in km.labels_]
+        except ImportError:
+            warn = 'kmeans: sklearn не установлен (pip install scikit-learn) — фолбэк в median'
+            method = 'median'
+
+    if method == 'median':
+        q = img.quantize(colors=K_req, method=Image.MEDIANCUT)
+        idx = list(q.getdata())
+        K = max(idx) + 1
+        pal = q.getpalette()[:K * 3]
+
+    if warn:
+        print(f'      ! {warn}', flush=True)
+
+    # слияние визуально идентичных цветов (см. merge_thresh выше по файлу)
     if merge_thresh > 0:
         parent = list(range(K))
 
@@ -69,16 +107,18 @@ def image_to_grid(img, max_size=150, n_colors=10, merge_thresh=24):
         idx = [remap[i] for i in idx]
         pal = npal
         K = len(npal) // 3
+
     cnt = Counter(idx)
-    bg = cnt.most_common(1)[0][0]              # самый частый цвет = фон картинки
+    bg = cnt.most_common(1)[0][0]
     order = [bg] + [i for i in range(K) if i != bg]
-    remap = {old: new + 1 for new, old in enumerate(order)}   # 1..K
-    rows, cols = q.size[1], q.size[0]
+    remap = {old: new + 1 for new, old in enumerate(order)}
+    rows, cols = img.size[1], img.size[0]
     grid = [[remap[idx[r * cols + c]] for c in range(cols)] for r in range(rows)]
-    palette = [(255, pal[bg * 3], pal[bg * 3 + 1], pal[bg * 3 + 2])]  # слот 0 = фон (дубль)
+    palette = [(255, pal[bg * 3], pal[bg * 3 + 1], pal[bg * 3 + 2])]
     for old in order:  # все K цветов, включая фон: ячейки используют индексы 1..K
         palette.append((255, pal[old * 3], pal[old * 3 + 1], pal[old * 3 + 2]))
     return grid, palette
+
 
 # ---------- 2. разбиение на пути ----------
 
@@ -646,14 +686,16 @@ def pick_solver(name='auto'):
 def generate(img, out_ppz, max_size=150, n_colors=None, preview_fn=None,
              target=None, seed=0, check=True, bendiness=None,
              check_time=15.0, safe_walls=False, progress=True, solver='auto',
-             export_img=None, try_seeds=1, merge_thresh=24, prewall_density=None):
+             export_img=None, try_seeds=1, merge_thresh=24, prewall_density=None,
+             quantize='kmeans'):
     import time as _t
     def say(msg):
         if progress:
             print(msg, flush=True)
     n_colors, target, bendiness = auto_params(img, max_size, n_colors, target, bendiness)
     say(f'[1/5] изображение → сетка ({n_colors} цветов)...')
-    grid, palette = image_to_grid(img, max_size, n_colors, merge_thresh=merge_thresh)
+    grid, palette = image_to_grid(img, max_size, n_colors, merge_thresh=merge_thresh,
+                                  method=quantize, seed=seed)
     rows, cols = len(grid), len(grid[0])
     if export_img:
         prgb = [(r, g, b) for a, r, g, b in palette]
@@ -674,6 +716,7 @@ def generate(img, out_ppz, max_size=150, n_colors=None, preview_fn=None,
     repairs = 0
     unique = None
     prewalled = 0
+    t3_start = None
     if safe_walls:
         say(f'[2/5] разбиение на пути (цель {target}, seed {seed})...')
         paths, squares = decompose(grid, target=target, seed=seed, bendiness=bendiness)
@@ -687,6 +730,7 @@ def generate(img, out_ppz, max_size=150, n_colors=None, preview_fn=None,
         say(f'[3/5] стены на всех контактах одноцветных путей: {wn} (единственность по построению)')
         unique = True
     elif check:
+        t3_start = _t.time()
         solver_fn = pick_solver(solver)
         is_backtrack = solver_fn is count_solutions
         can_check = rows * cols <= 1500 or not is_backtrack
@@ -763,6 +807,8 @@ def generate(img, out_ppz, max_size=150, n_colors=None, preview_fn=None,
             raise RuntimeError('валидация не пройдена: ' + '; '.join(errs[:5]))
         say('[3/5] проверка отключена (--no-check)')
 
+    if t3_start is not None:
+        say(f'      этап [3/5] занял {_t.time() - t3_start:.1f} с')
     say(f'[4/5] запись {out_ppz}...')
     n = write_ppz(out_ppz, rows, cols, palette, cells)
     if preview_fn:
@@ -791,6 +837,9 @@ def main():
     ap.add_argument('input'); ap.add_argument('output')
     ap.add_argument('--max', type=int, default=150)
     ap.add_argument('--colors', type=int, default=None, help='по умолчанию авто (10)')
+    ap.add_argument('--quantize', choices=['kmeans', 'median', 'exact'], default='kmeans',
+                    help='метод квантования: kmeans (sklearn, дефолт; без него — median), '
+                         'median (PIL), exact (реальные цвета, если их <= 30)')
     ap.add_argument('--prewall-density', type=float, default=None,
                     help='доля параллельных контактов под пре-стенами (0..1); '
                          'умолчание 0.15 с SAT, 1.0 с бэктреком')
@@ -825,7 +874,8 @@ def main():
                   bendiness=a.bendiness, check_time=a.time,
                   safe_walls=a.safe_walls, progress=not a.quiet, solver=a.solver,
                   export_img=a.export_img, try_seeds=a.try_seeds,
-                  merge_thresh=a.merge_thresh, prewall_density=a.prewall_density)
+                  merge_thresh=a.merge_thresh, prewall_density=a.prewall_density,
+                  quantize=a.quantize)
     u = {True: 'единственное решение', False: 'НЕ ЕДИНСТВЕННО', None: 'не проверялось (большое поле)'}[st['unique']]
     print(f"OK: {st['rows']}×{st['cols']}, цветов {st['colors']}, путей {st['paths']}, "
           f"квадратиков {st['squares']}, стен {st['walls']} (ремонт: {st['repairs']}), "

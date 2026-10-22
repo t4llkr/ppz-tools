@@ -51,8 +51,11 @@ kbd{border:1px solid var(--border);border-radius:4px;padding:0 4px;font:11px var
     <div class="seg">
       <button id="mPuz" class="on">Уровень</button>
       <button id="mSol">Решение</button>
+      <button id="mPlay">Решать</button>
     </div>
     <button class="btn" id="openBtn">Открыть файл…</button>
+    <button class="btn" id="clearBtn" style="display:none" title="Стереть все нарисованные пути">Очистить</button>
+    <button class="btn" id="checkBtn" style="display:none" title="Сверить все пути с единственным решением уровня">Проверить</button>
     <span class="name" id="fname">demo: 001.ppz</span>
     <input type="file" id="fileIn" accept=".ppz,.bin" style="display:none">
   </div>
@@ -64,11 +67,14 @@ kbd{border:1px solid var(--border);border-radius:4px;padding:0 4px;font:11px var
     Формат: заголовок <kbd>PPZ&nbsp;</kbd> + версии + размер тела; тело v1 — размеры, палитра ARGB,
     затем по 3 байта на клетку (row-major): цвет (5 бит), стрелки (3+3 бита, коды 1=W,2=N,3=E,4=S),
     подсказка (5 бит: 0 — путь, 1 — квадратик, иначе длина пути), маска стен (W=1,N=2,E=4,S=8).
+    <br>Режим «Решать»: тяните путь от подсказки (или от конца уже нарисованного пути); шаг назад по своему пути стирает его край.
+    Соедините две одинаковые подсказки одного цвета ровно указанным числом клеток; клетка не может принадлежать двум путям.
+    <b>Дабл-клик</b> по пути стирает его целиком. Кнопка «Проверить» сверяет все проложенные пути с единственным решением уровня и очищает несовпавшие.
   </div>
 </div>
 <script>
 const DEMO='UFBaIAIBAAAA4QAHAAgEAAAAAAAAAAAAAAAAAAAAUgAAAAAAAAAAAAAAAAAAAAAAAAAA//////8AAAD/zDMA//9mMwsEAAkDAAkDAAkDAAkwABAUAAsQAAkQAAgyABMoABEEAAs4AAkEABASABsEABkEABMoABEDABECAAsEAAkCABsoABkCABgqABMEABEEAAsEAAkCABgcABsEABkEAAgIABA6ABIEAAg6ABsYABkCABoEABgyABAIAAgcABMCABEEABsEABkEABsCABkwAAgUAAsCAAkYABA6ABgqABsCABkoABAIAAgSAA==';
-let P=null, mode='puz';
+let P=null, mode='puz', U=null, drag=null, lastV=null;
 const $=id=>document.getElementById(id);
 const DN=['—','W','N','E','S','?','?','?'], WN=['W','N','E','S'], WB={W:1,N:2,E:4,S:8};
 const WDEL={W:[0,-1],N:[-1,0],E:[0,1],S:[1,0]};
@@ -180,6 +186,11 @@ function draw(){
     if(cl.wall&4) seg([x0+cell,y0+inset],[x0+cell,y0+cell-inset]);
     if(cl.wall&8) seg([x0+inset,y0+cell],[x0+cell-inset,y0+cell]);
   });
+  if(mode==='play'&&U&&U.edges.size){
+    ctx.lineWidth=cell*0.72; ctx.lineCap='round'; ctx.lineJoin='round';
+    for(const k of U.edges){ const m=k.split('_'), a=+m[0], b=+m[1];
+      ctx.strokeStyle=ARGB(P.pal[U.col.get(k)]); ctx.beginPath(); ctx.moveTo(cx(a),cy(a)); ctx.lineTo(cx(b),cy(b)); ctx.stroke(); }
+  }
   if(mode==='sol'){
     ctx.lineWidth=cell*0.72; ctx.lineCap='round'; ctx.lineJoin='round';
     P.cells.forEach((cl,i)=>{
@@ -207,21 +218,210 @@ function draw(){
   });
 }
 
+/* ---------- режим «Решать»: ручное построение путей ---------- */
+function cd(i){ return '('+((i/P.cols)|0)+','+(i%P.cols)+')'; }
+function newUser(){ U={edges:new Set(), col:new Map(), deg:new Array(P.rows*P.cols).fill(0)}; }
+const ekey=(a,b)=>a<b?a+'_'+b:b+'_'+a;
+function edgeAt(i){ for(const k of U.edges){ const m=k.split('_'); if(+m[0]===i||+m[1]===i) return k; } return null; }
+function adj8(a,b){ const ar=(a/P.cols)|0, ac=a%P.cols, br=(b/P.cols)|0, bc=b%P.cols; return Math.abs(ar-br)+Math.abs(ac-bc)===1; }
+function wallBetween(a,b){
+  const ar=(a/P.cols)|0, ac=a%P.cols, br=(b/P.cols)|0, bc=b%P.cols;
+  const dir=br<ar?'N':br>ar?'S':bc<ac?'W':'E', opp={W:'E',E:'W',N:'S',S:'N'}[dir];
+  return !!(P.cells[a].wall&WB[dir])||!!(P.cells[b].wall&WB[opp]);
+}
+function cellAt(e){
+  const cv=$('board'), r=cv.getBoundingClientRect(), pad=10;
+  const sx=cv.width/r.width, sy=cv.height/r.height;
+  const cw=(cv.width-pad*2)/P.cols, ch=(cv.height-pad*2)/P.rows;
+  const c=Math.floor((e.clientX-r.left-pad/sx)/(cw/sx)), rw=Math.floor((e.clientY-r.top-pad/sy)/(ch/sy));
+  return (rw<0||rw>=P.rows||c<0||c>=P.cols)?-1:rw*P.cols+c;
+}
+function walk(i){
+  const adj={}; for(const k of U.edges){ const m=k.split('_'), a=+m[0], b=+m[1]; (adj[a]=adj[a]||[]).push(b); (adj[b]=adj[b]||[]).push(a); }
+  const out=[i]; let prev=-1, cur=i;
+  for(;;){ const nx=(adj[cur]||[]).filter(x=>x!==prev); if(!nx.length) break; prev=cur; cur=nx[0]; out.push(cur); if(out.length>U.deg.length) break; }
+  return out.reverse(); // рабочий конец (захваченная клетка) — последний в списке
+}
+function say(m){ $('status').textContent=m; }
+/* ---------- сверка с эталонным решением уровня ---------- */
+let solEdges=null;
+function buildSolEdges(){
+  solEdges=new Set();
+  for(let i=0;i<P.cells.length;i++){
+    const cl=P.cells[i], r=(i/P.cols)|0, c=i%P.cols;
+    for(const code of [cl.hi,cl.lo]){ if(!code||code>4) continue;
+      const d=ADEL[code], nr=r+d[0], nc=c+d[1];
+      if(nr<0||nr>=P.rows||nc<0||nc>=P.cols) continue;
+      const j=nr*P.cols+nc; if(j!==i) solEdges.add(ekey(i,j));
+    }
+  }
+}
+function componentOf(i){
+  const adj={}; for(const k of U.edges){ const m=k.split('_'), a=+m[0], b=+m[1]; (adj[a]=adj[a]||[]).push(b); (adj[b]=adj[b]||[]).push(a); }
+  const comp=new Set([i]), st=[i];
+  while(st.length){ const c=st.pop(); for(const nx of (adj[c]||[])) if(!comp.has(nx)){ comp.add(nx); st.push(nx); } }
+  return comp;
+}
+function removeComponent(comp,msg){
+  for(const k of [...U.edges]){ const m=k.split('_');
+    if(comp.has(+m[0])&&comp.has(+m[1])){ U.edges.delete(k); U.col.delete(k); U.deg[+m[0]]--; U.deg[+m[1]]--; } }
+  if(msg) say(msg);
+  updatePlay();
+}
+function startDrag(i){
+  const cl=P.cells[i];
+  if(cl.clue===1){ say('квадратик закрашен автоматически'); return; }
+  if(cl.clue>1){
+    if(U.deg[i]===0){ drag={cells:[i],color:cl.color}; say('тяните путь к подсказке того же цвета'); }
+    else if(U.deg[i]===1){ drag={cells:walk(i),color:cl.color}; say(''); }
+    else say('подсказка уже внутри пути');
+    return;
+  }
+  if(U.deg[i]===1){ const k=edgeAt(i); drag={cells:walk(i),color:U.col.get(k)}; say(''); }
+  else say('начните с подсказки или с конца нарисованного пути');
+}
+function dragTo(i){
+  if(!drag) return;
+  const L=drag.cells, last=L[L.length-1];
+  if(i===last) return;
+  if(L.length>1&&i===L[L.length-2]){
+    if(P.cells[last].clue>1&&!L.slice(0,-1).some(c=>P.cells[c].clue>1)){ say('нельзя отсоединить путь от единственной подсказки'); return; }
+    const k=ekey(last,i); U.edges.delete(k); U.col.delete(k); U.deg[last]--; U.deg[i]--; L.pop(); updatePlay(); return;
+  }
+  if(L.length>1&&P.cells[last].clue>1){ say('путь завершён — тяните от другого конца или назад'); return; }
+  if(!adj8(last,i)) return;
+  if(L.indexOf(i)>=0){ say('нельзя: замкнутая петля'); return; }
+  const ci=P.cells[i];
+  if(ci.clue===1){ say('нельзя: клетка занята квадратиком'); return; }
+  if(U.deg[i]>0){ say('нельзя: клетка занята другим путём'); return; }
+  if(wallBetween(last,i)){ say('нельзя: стена'); return; }
+  const k=ekey(last,i), newLen=L.length+1;
+  if(ci.clue>1){
+    if(ci.color!==drag.color){ say('нельзя: подсказка другого цвета'); return; }
+    const cv=P.cells[L[0]].clue; // опорная подсказка пути
+    if(ci.clue!==cv){ say('нельзя соединить разные подсказки: '+cv+' ≠ '+ci.clue); return; }
+    if(newLen!==ci.clue){ say('стык не засчитан: длина '+newLen+' ≠ подсказке '+ci.clue); return; }
+    U.edges.add(k); U.col.set(k,drag.color); U.deg[last]++; U.deg[i]++; L.push(i);
+    say('путь завершён: '+ci.clue+' клеток');
+  }else{
+    const cv=P.cells[L[0]].clue; // L[0] — опорная подсказка пути
+    if(cv>1&&newLen>=cv){ say('превышена длина: из '+cv+' клеток последняя — под соединение с подсказкой'); return; }
+    U.edges.add(k); U.col.set(k,drag.color); U.deg[last]++; U.deg[i]++; L.push(i);
+  }
+  updatePlay();
+}
+function validateUser(){
+  const {rows,cols,cells}=P, N=rows*cols;
+  const adj=Array.from({length:N},()=>[]);
+  for(const k of U.edges){ const m=k.split('_'), a=+m[0], b=+m[1]; adj[a].push(b); adj[b].push(a); }
+  const errs=[], seen=new Array(N).fill(false);
+  let covered=0, paths=0, conn=0, open=0;
+  cells.forEach((cl,i)=>{ if(cl.clue===1) covered++; if(cl.clue>1&&adj[i].length) conn++; });
+  for(let i=0;i<N;i++){
+    if(seen[i]||!adj[i].length) continue;
+    const comp=[]; const st=[i]; seen[i]=true;
+    while(st.length){ const c=st.pop(); comp.push(c); for(const nx of adj[c]) if(!seen[nx]){ seen[nx]=true; st.push(nx); } }
+    covered+=comp.length;
+    const ends=comp.filter(c=>adj[c].length<=1);
+    const br=comp.find(c=>adj[c].length>2); if(br!==undefined) errs.push('разветвление в пути '+cd(br));
+    if(!ends.length) errs.push('замкнутый путь '+cd(comp[0]));
+    else if(ends.length!==2) errs.push('путь '+cd(comp[0])+': найдено '+ends.length+' концов (ожидалось 2)');
+    else{
+      const a=ends[0], b=ends[1], ca=cells[a], cb=cells[b];
+      const ac=ca.clue>1, bc=cb.clue>1;
+      if(!ac&&!bc) errs.push('путь '+cd(a)+'–'+cd(b)+' не привязан ни к одной подсказке');
+      else if(ac!==bc) open++; // незавершённый путь: не ошибка, но не даёт статус «решено»
+      else if(ca.color!==cb.color) errs.push('концы пути разного цвета '+cd(a)+'–'+cd(b));
+      else{
+        if(ca.clue!==cb.clue) errs.push('подсказки пути не совпадают: '+ca.clue+' ≠ '+cb.clue);
+        else if(comp.length===ca.clue) paths++;
+        if(comp.length!==ca.clue||comp.length!==cb.clue) errs.push('путь '+cd(a)+': длина '+comp.length+' (подсказки '+ca.clue+' и '+cb.clue+')');
+      }
+    }
+    comp.forEach(c=>{ if(cells[c].clue>1&&adj[c].length===2) errs.push('подсказка в середине пути '+cd(c)); });
+  }
+  return {errs,covered,paths,conn,open,ok:!errs.length&&!open&&covered===N};
+}
+function updatePlay(){
+  if(!P||!U) return;
+  const v=validateUser(), N=P.rows*P.cols;
+  let nc=0; P.cells.forEach(cl=>{ if(cl.clue>1) nc++; });
+  $('chips').innerHTML=
+    '<span class="chip">заполнено <b>'+v.covered+'/'+N+'</b></span>'+
+    '<span class="chip">подсказок <b>'+v.conn+'/'+nc+'</b></span>'+
+    '<span class="chip">путей <b>'+v.paths+'</b></span>'+
+    (v.open?'<span class="chip">незавершённых <b>'+v.open+'</b></span>':'')+
+    (v.ok?'<span class="chip ok">решено <b>✔</b></span>':'<span class="chip'+(v.errs.length?' bad':'')+'">проблем <b>'+v.errs.length+'</b></span>');
+  $('errs').textContent=v.errs.slice(0,6).join('\n')+(v.errs.length>6?'\n… +'+(v.errs.length-6):'');
+  draw();
+}
+function renderChips(v){
+  $('chips').innerHTML=
+    '<span class="chip">поле <b>'+P.rows+'×'+P.cols+'</b></span>'+
+    '<span class="chip">цветов <b>'+P.nc+'</b></span>'+
+    '<span class="chip">подсказок <b>'+v.clues+'</b></span>'+
+    '<span class="chip">квадратиков <b>'+v.squares+'</b></span>'+
+    '<span class="chip">стен <b>'+v.walls+'</b></span>'+
+    '<span class="chip">путей <b>'+v.paths+'</b></span>'+
+    (v.ok?'<span class="chip ok">проверка <b>OK</b></span>':'<span class="chip bad">проблем <b>'+v.errs.length+'</b></span>');
+}
+function setMode(m){
+  mode=m; drag=null;
+  $('mPuz').classList.toggle('on',m==='puz');
+  $('mSol').classList.toggle('on',m==='sol');
+  $('mPlay').classList.toggle('on',m==='play');
+  $('clearBtn').style.display=m==='play'?'':'none';
+  $('checkBtn').style.display=m==='play'?'':'none';
+  if(m==='play'){ if(!U) newUser(); updatePlay(); } else if(P&&lastV) renderChips(lastV);
+  if(P) draw();
+}
+$('mPuz').onclick=()=>setMode('puz');
+$('mSol').onclick=()=>setMode('sol');
+$('mPlay').onclick=()=>setMode('play');
+$('clearBtn').onclick=()=>{ if(!U) return; U.edges.clear(); U.col.clear(); U.deg.fill(0); drag=null; say('решение очищено'); updatePlay(); };
+$('checkBtn').onclick=()=>checkSolution();
+function eraseAt(i){
+  if(!U||U.deg[i]===0) return;
+  drag=null;
+  removeComponent(componentOf(i),'путь стёрт');
+}
+/* ---------- кнопка «Проверить»: сверка ВСЕХ путей с решением ---------- */
+function checkSolution(){
+  if(!P||!U) return;
+  if(!U.edges.size){ say('проверять нечего — решение не начато'); return; }
+  const seen=new Set(); let okN=0, badN=0;
+  for(const k0 of [...U.edges]){
+    if(seen.has(k0)) continue;
+    const comp=componentOf(+k0.split('_')[0]);
+    const compEdges=[];
+    for(const k of U.edges){ const m=k.split('_'); if(comp.has(+m[0])&&comp.has(+m[1])) compEdges.push(k); }
+    let allOk=true;
+    for(const k of compEdges){ seen.add(k); if(!solEdges.has(k)) allOk=false; }
+    if(allOk) okN++;
+    else{ badN++; removeComponent(comp,null); }
+  }
+  say(badN? ('проверка: верных путей '+okN+', не совпали с решением '+badN+' — очищены')
+          : ('проверка: все пути совпадают с решением ('+okN+')'));
+}
+$('board').addEventListener('dblclick',e=>{ if(mode!=='play'||!P) return; const i=cellAt(e); if(i>=0) eraseAt(i); });
+$('board').addEventListener('mousedown',e=>{ if(mode!=='play'||!P) return; const i=cellAt(e); if(i>=0) startDrag(i); });
+window.addEventListener('mousemove',e=>{ if(!drag) return; const i=cellAt(e); if(i>=0) dragTo(i); });
+window.addEventListener('mouseup',()=>{ drag=null; });
+$('board').addEventListener('touchstart',e=>{ if(mode!=='play'||!P) return; e.preventDefault(); const t=e.changedTouches[0]; const i=cellAt(t); if(i>=0) startDrag(i); },{passive:false});
+$('board').addEventListener('touchmove',e=>{ if(!drag) return; e.preventDefault(); const t=e.changedTouches[0]; const i=cellAt(t); if(i>=0) dragTo(i); },{passive:false});
+window.addEventListener('touchend',()=>{ drag=null; });
+
 function load(buf,name){
   try{
     P=parsePPZ(buf);
-    const v=validate(P);
+    buildSolEdges();
+    U=null; drag=null;
+    const v=validate(P); lastV=v;
     $('fname').textContent=name;
     $('status').textContent='';
     $('errs').textContent=v.ok?'':v.errs.slice(0,6).join('\n')+(v.errs.length>6?'\n… +'+ (v.errs.length-6):'');
-    $('chips').innerHTML=
-      '<span class="chip">поле <b>'+P.rows+'×'+P.cols+'</b></span>'+
-      '<span class="chip">цветов <b>'+P.nc+'</b></span>'+
-      '<span class="chip">подсказок <b>'+v.clues+'</b></span>'+
-      '<span class="chip">квадратиков <b>'+v.squares+'</b></span>'+
-      '<span class="chip">стен <b>'+v.walls+'</b></span>'+
-      '<span class="chip">путей <b>'+v.paths+'</b></span>'+
-      (v.ok?'<span class="chip ok">проверка <b>OK</b></span>':'<span class="chip bad">проблем <b>'+v.errs.length+'</b></span>');
+    renderChips(v);
+    if(mode==='play'){ newUser(); updatePlay(); }
     draw();
   }catch(e){
     P=null; $('fname').textContent=name;
@@ -231,8 +431,7 @@ function load(buf,name){
   }
 }
 
-$('mPuz').onclick=()=>{ mode='puz'; $('mPuz').classList.add('on'); $('mSol').classList.remove('on'); if(P) draw(); };
-$('mSol').onclick=()=>{ mode='sol'; $('mSol').classList.add('on'); $('mPuz').classList.remove('on'); if(P) draw(); };
+
 $('openBtn').onclick=()=>$('fileIn').click();
 $('fileIn').onchange=e=>{ const f=e.target.files[0]; if(f) f.arrayBuffer().then(b=>load(b,f.name)); };
 const stage=$('stage');
@@ -241,6 +440,7 @@ stage.addEventListener('dragleave',()=>stage.classList.remove('over'));
 stage.addEventListener('drop',e=>{ e.preventDefault(); stage.classList.remove('over'); const f=e.dataTransfer.files[0]; if(f) f.arrayBuffer().then(b=>load(b,f.name)); });
 $('board').addEventListener('mousemove',e=>{
   if(!P) return;
+  if(drag){ const i=cellAt(e); if(i>=0) dragTo(i); return; }
   const r=$('board').getBoundingClientRect(), pad=10, sx=$('board').width/r.width, sy=$('board').height/r.height;
   const c=Math.floor((e.clientX-r.left-pad/sx)/(($('board').width-20)/sx/P.cols));
   const rw=Math.floor((e.clientY-r.top-pad/sy)/(($('board').height-20)/sy/P.rows));
